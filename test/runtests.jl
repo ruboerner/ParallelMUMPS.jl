@@ -6,12 +6,13 @@ using LinearAlgebra
 
 @testset "ParallelMUMPS" begin
     addprocs(2)
+	@everywhere using ParallelMUMPS
 
     ParallelMUMPS.init_workers!()
 
     n = 50
     K = sparse(sprand(ComplexF64, n, n, 0.05) + 20.0I)
-    M = sparse(sprand(ComplexF64, n, n, 0.05) + 2.0I)
+    M = K 
     xis = ComplexF64[0.1 + 0.1im, 0.2 + 0.1im, 0.3 + 0.1im]
 
     ws = workers()
