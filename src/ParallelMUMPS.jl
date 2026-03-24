@@ -100,6 +100,26 @@ function build_factor!(i, A)
 end
 
 """
+    build_factor!(i, K, M, ξ)
+
+Build or rebuild the factorization for shift index `i` on the current process.
+"""
+function build_factor!(i, K, M, ξ)
+    A = K - ξ * M
+    if haskey(FACTORS, i)
+        finalize(FACTORS[i])
+        delete!(FACTORS, i)
+    end
+    icntl = get_icntl(verbose=false)
+    m = Mumps{eltype(A)}(mumps_unsymmetric, icntl, default_cntl64)
+    associate_matrix!(m, A)
+    factorize!(m)
+    FACTORS[i] = m
+    return nothing
+end
+
+
+"""
     build_many_factors!(idxs, K, M, xis)
 
 Build factors for several shift indices on the current process.
@@ -109,16 +129,24 @@ for every shift. `K` and `M` must have identical sparsity patterns.
 """
 function build_many_factors!(idxs, K::SparseMatrixCSC, M::SparseMatrixCSC, xis)
     length(idxs) == length(xis) || throw(ArgumentError("idxs and xis must have same length"))
-        K.colptr == M.colptr || throw(ArgumentError("K and M must have identical sparsity patterns"))
-    K.rowval == M.rowval || throw(ArgumentError("K and M must have identical sparsity patterns"))
 
-    Awork = copy(K)
+        # K.colptr == M.colptr || throw(ArgumentError("K and M must have identical sparsity patterns"))
+    # K.rowval == M.rowval || throw(ArgumentError("K and M must have identical sparsity patterns"))
+
+    do_A = (K.colptr == M.colptr) & (K.rowval == M.rowval) 
+    
+    if do_A
+        Awork = copy(K)
+    end
 
     for k in eachindex(idxs)
-        # build_factor!(idxs[k], K, M, xis[k])
         # build_factor!(idxs[k], (K - xis[k] * M) )
-        _assemble_shift!(Awork, K, M, xis[k])
-        build_factor!(idxs[k], Awork)
+        if do_A 
+            _assemble_shift!(Awork, K, M, xis[k])
+            build_factor!(idxs[k], Awork)
+        else
+            build_factor!(idxs[k], K, M, xis[k])
+        end
     end
     return nothing
 end
