@@ -13,8 +13,8 @@ where
 
 - `K` and `M` are sparse real-valued matrices,
 - `xis` is a vector of (complex) shifts,
-- `B` is a fixed right-hand side, possibly with many columns,
-- `X` is a container of (complex) solution blocks, ordered so that `X[i]` corresponds to `xis[i]`
+- `B` is either a fixed right-hand vector, or a block with as many columns as entries in `xis`,
+- `X` is a block of (complex) solutions, columns ordered so that `X[:, i]` corresponds to `xis[i]`
 
 The package is designed for the case where
 
@@ -71,6 +71,7 @@ The package currently exports:
 - `init_workers!()`
 - `factorize_shifts_grouped!(owner, K, M, xis)`
 - `solve_block_all_xis(owner, xis, B)`
+- `solve_columns_all_xis(owner, xis, B)`
 - `free_factors!()`
 - `finalize_workers!()`
 
