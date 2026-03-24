@@ -28,6 +28,16 @@ using LinearAlgebra
         @test norm(A * Xs[i] - B) / norm(B) < 1e-8
     end
 
+    M = sparse(sprand(ComplexF64, n, n, 0.05) + 2.0I)
+    ParallelMUMPS.factorize_shifts_grouped!(owner, K, M, xis)
+
+    Xs = ParallelMUMPS.solve_block_all_xis(owner, xis, B)
+
+    for i in eachindex(xis)
+        A = K - xis[i] * M
+        @test norm(A * Xs[i] - B) / norm(B) < 1e-8
+    end
+
     ParallelMUMPS.free_factors!()
     ParallelMUMPS.finalize_workers!()
 end
