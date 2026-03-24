@@ -290,7 +290,7 @@ function solve_block_all_xis(owner::Dict{Int,Int}, xis, B)
         end
     end
 
-    return hcat(Xs...)
+    return Xs
 end
 
 """
@@ -336,8 +336,9 @@ function solve_columns_all_xis(owner::Dict{Int,Int}, xis, B)
         end
     end
 
-    return hcat(X...)
+    return X
 end
+
 
 
 """
