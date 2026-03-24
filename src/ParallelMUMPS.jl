@@ -136,7 +136,15 @@ function build_many_factors!(idxs, K::SparseMatrixCSC, M::SparseMatrixCSC, xis)
     do_A = (K.colptr == M.colptr) & (K.rowval == M.rowval) 
     
     if do_A
-        Awork = copy(K)
+        # Awork = copy(K)
+        Twork = promote_type(eltype(K), eltype(M), eltype(xis))
+        Awork = SparseMatrixCSC(
+            size(K, 1),
+            size(K, 2),
+            copy(K.colptr),
+            copy(K.rowval),
+            Vector{Twork}(undef, nnz(K)),
+        )
     end
 
     for k in eachindex(idxs)
