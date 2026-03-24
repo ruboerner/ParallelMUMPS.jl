@@ -10,7 +10,8 @@ using LinearAlgebra
 
 export init_workers!,
     factorize_shifts_grouped!,
-    solve_block_all_xis,    
+    solve_block_all_xis, 
+    solve_columns_all_xis,   
     free_factors!,
     finalize_workers!
 
@@ -178,6 +179,31 @@ function solve_same_rhs_with_factors(idxs, B)
     return Xs
 end
 
+"""
+    solve_matching_columns_with_factors(idxs, B)
+
+Solve local systems for several shift indices where the right-hand side for
+shift `idxs[k]` is the corresponding column `B[:, idxs[k]]`.
+
+Returns a vector `xs` in the same order as `idxs`, where each entry is the
+solution vector for the matching shift.
+"""
+function solve_matching_columns_with_factors(idxs, B)
+    size(B, 2) >= maximum(idxs) || throw(ArgumentError("B must have at least one column per shift index"))
+
+    xs = Vector{Any}(undef, length(idxs))
+    for k in eachindex(idxs)
+        i = idxs[k]
+        m = FACTORS[i]
+        bi = copy(B[:, i])
+        associate_rhs!(m, bi)
+        solve!(m)
+        xs[k] = copy(get_solution(m))
+        MUMPS.set_job!(m, 4)
+    end
+    return xs
+end
+
 # -----------------------------------------------------------------------------
 # Distributed API
 # -----------------------------------------------------------------------------
@@ -267,7 +293,51 @@ function solve_block_all_xis(owner::Dict{Int,Int}, xis, B)
     return Xs
 end
 
+"""
+    solve_columns_all_xis(owner, xis, B)
+    Solve
+        (K - ξ_i M) x_i = b_i
 
+for all shifts `ξ_i`, where `b_i` is column `i` of the block `B`.
+
+Arguments
+---------
+- `owner[i]`: worker that owns the factorization for shift `i`
+- `xis`: shift vector, only used for ordering/length
+- `B`: block whose i-th column is the right-hand side for shift `i`
+
+Returns
+-------
+A matrix `X` whose i-th column is the solution vector corresponding to `ξ_i`.
+The column ordering of `X` matches the ordering of `xis`.
+"""
+function solve_columns_all_xis(owner::Dict{Int,Int}, xis, B)
+    length(xis) == size(B, 2) || throw(ArgumentError("B must have as many columns as xis"))
+
+    ws = unique(values(owner))
+
+    grouped_idxs = Dict(w => Int[] for w in ws)
+    for i in eachindex(xis)
+        push!(grouped_idxs[owner[i]], i)
+    end
+
+    T = promote_type(eltype(B), eltype(xis))
+    X = Matrix{T}(undef, size(B, 1), length(xis))
+
+    @sync for w in ws
+        idxs_w = grouped_idxs[w]
+        isempty(idxs_w) && continue
+
+        @async begin
+            xs_w = remotecall_fetch(solve_matching_columns_with_factors, w, idxs_w, B)
+            for (j, i) in enumerate(idxs_w)
+                X[:, i] = xs_w[j]
+            end
+        end
+    end
+
+    return X
+end
 
 
 """
