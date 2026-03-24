@@ -5,7 +5,7 @@
 `ParallelMUMPS.jl` provides a small distributed wrapper around [`MUMPS.jl`](https://github.com/JuliaSmoothOptimizers/MUMPS.jl) for solving families of shifted sparse systems of the form
 
 ```math
-(K - \xi_i M) X_i = B,
+(\mathbf K - \xi_i \mathbf M) \mathbf X_i = \mathbf B,
 \qquad i = 1,\dots,n_\xi,
 ```
 
@@ -13,7 +13,8 @@ where
 
 - `K` and `M` are sparse matrices,
 - `xis` is a vector of shifts,
-- `B` is a fixed right-hand side, possibly with many columns.
+- `B` is a fixed right-hand side, possibly with many columns,
+- `X` is a container of solution blocks, ordered so that `X[i]` corresponds to `xis[i]`
 
 The package is designed for the case where
 
@@ -34,12 +35,12 @@ The package is designed for the case where
 The main use case is a family of systems
 
 ```math
-A_i = K - \xi_i M,
+\mathbf A_i = \mathbf K - \xi_i \mathbf M,
 \qquad
-X_i = A_i^{-1} B.
+\mathbf X_i = \mathbf A_i^{-1} \mathbf B.
 ```
 
-The returned solution container is ordered so that `Xs[i]` corresponds to `xis[i]`.
+The returned solution container is ordered so that `X[i]` corresponds to `xis[i]`.
 
 ## Installation
 
@@ -54,7 +55,7 @@ For development:
 
 ```julia
 using Pkg
-Pkg.develop(url="https://github.com/USERNAME/ParallelMUMPS.jl")
+Pkg.develop(url="https://github.com/ruboerner/ParallelMUMPS.jl")
 ```
 
 ## Requirements
@@ -124,7 +125,7 @@ The factorization for shift `i` is built and stored on that worker. Solves are t
 For best performance, `K` and `M` should have identical sparse patterns. The factorization path reuses a sparse workspace matrix and overwrites its numerical values in place when assembling
 
 ```math
-K - \xi_i M.
+\mathbf A_i := \mathbf K - \xi_i \mathbf M.
 ```
 
 The package also supports the more general case where `K` and `M` do **not** share the same CSC structure. In that situation, the shifted matrix is assembled on the combined sparsity pattern internally. This is more flexible, but may lead to higher memory use and more allocations than the matched-pattern case.
@@ -166,4 +167,3 @@ From the Julia REPL:
 - `MUMPS` factors are stored in worker-local state.
 - `finalize_workers!()` finalizes MPI on workers and removes the workers.
 - After `finalize_workers!()`, add workers again before reusing the package in the same Julia session.
-
