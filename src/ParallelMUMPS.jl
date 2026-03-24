@@ -6,7 +6,7 @@ using MUMPS
 using SparseArrays
 using LinearAlgebra
 
-BLAS.set_num_threads(1)
+# BLAS.set_num_threads(1)
 
 export init_workers!,
     factorize_shifts_grouped!,
