@@ -25,7 +25,7 @@ using LinearAlgebra
 
     for i in eachindex(xis)
         A = K - xis[i] * M
-        @test norm(A * Xs[i] - B) / norm(B) < 1e-8
+        @test norm(A * Xs[:, i] - B) / norm(B) < 1e-8
     end
 
     M = sparse(sprand(ComplexF64, n, n, 0.05) + 2.0I)
@@ -35,7 +35,15 @@ using LinearAlgebra
 
     for i in eachindex(xis)
         A = K - xis[i] * M
-        @test norm(A * Xs[i] - B) / norm(B) < 1e-8
+        @test norm(A * Xs[:, i] - B) / norm(B) < 1e-8
+    end
+
+    B = rand(ComplexF64, n, length(xis))
+    Xs = ParallelMUMPS.solve_columns_all_xis(owner, xis, B)
+
+    for i in eachindex(xis)
+        A = K - xis[i] * M
+        @test norm(A * Xs[:, i] - B[:, i]) / norm(B[:, i]) < 1e-8
     end
 
     ParallelMUMPS.free_factors!()
