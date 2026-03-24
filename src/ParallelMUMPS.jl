@@ -9,10 +9,10 @@ using LinearAlgebra
 BLAS.set_num_threads(1)
 
 export init_workers!,
-    finalize_workers!,
     factorize_shifts_grouped!,
-    solve_block_all_xis,
-    free_factors!
+    solve_block_all_xis,    
+    free_factors!,
+    finalize_workers!
 
 # -----------------------------------------------------------------------------
 # Worker-local state and helpers
@@ -81,7 +81,7 @@ end
 
 
 """
-    build_factor!(i, K, M, ξ)
+    build_factor!(i, A)
 
 Build or rebuild the factorization for shift index `i` on the current process.
 """
@@ -170,47 +170,6 @@ function solve_same_rhs_with_factors(idxs, B)
     return Xs
 end
 
-"""
-    solve_block_all_xis(owner, xis, B)
-
-Solve `(K - ξ_i M) X_i = B` for all `ξ_i` using already cached factors.
-
-Arguments
----------
-- `owner[i]`: worker that owns the factorization for shift `i`
-- `xis`: shift vector, only used for ordering/length
-- `B`: fixed RHS block, vector or dense matrix
-
-Returns
--------
-A vector `Xs` such that `Xs[i]` is the solution block corresponding to `ξ_i`.
-So the ordering of `Xs` matches the ordering of `xis`.
-"""
-function solve_block_all_xis(owner::Dict{Int,Int}, xis, B)
-    ws = unique(values(owner))
-
-    grouped_idxs = Dict(w => Int[] for w in ws)
-    for i in eachindex(xis)
-        push!(grouped_idxs[owner[i]], i)
-    end
-
-    Xs = Vector{Any}(undef, length(xis))
-
-    @sync for w in ws
-        idxs_w = grouped_idxs[w]
-        isempty(idxs_w) && continue
-
-        @async begin
-            Xs_w = remotecall_fetch(solve_same_rhs_with_factors, w, idxs_w, B)
-            for (j, i) in enumerate(idxs_w)
-                Xs[i] = Xs_w[j]
-            end
-        end
-    end
-
-    return Xs
-end
-
 # -----------------------------------------------------------------------------
 # Distributed API
 # -----------------------------------------------------------------------------
@@ -258,6 +217,50 @@ function factorize_shifts_grouped!(owner::Dict{Int,Int}, K, M, xis)
 
     return nothing
 end
+
+"""
+    solve_block_all_xis(owner, xis, B)
+
+Solve `(K - ξ_i M) X_i = B` for all `ξ_i` using already cached factors.
+
+Arguments
+---------
+- `owner[i]`: worker that owns the factorization for shift `i`
+- `xis`: shift vector, only used for ordering/length
+- `B`: fixed RHS block, vector or dense matrix
+
+Returns
+-------
+A vector `Xs` such that `Xs[i]` is the solution block corresponding to `ξ_i`.
+So the ordering of `Xs` matches the ordering of `xis`.
+"""
+function solve_block_all_xis(owner::Dict{Int,Int}, xis, B)
+    ws = unique(values(owner))
+
+    grouped_idxs = Dict(w => Int[] for w in ws)
+    for i in eachindex(xis)
+        push!(grouped_idxs[owner[i]], i)
+    end
+
+    Xs = Vector{Any}(undef, length(xis))
+
+    @sync for w in ws
+        idxs_w = grouped_idxs[w]
+        isempty(idxs_w) && continue
+
+        @async begin
+            Xs_w = remotecall_fetch(solve_same_rhs_with_factors, w, idxs_w, B)
+            for (j, i) in enumerate(idxs_w)
+                Xs[i] = Xs_w[j]
+            end
+        end
+    end
+
+    return Xs
+end
+
+
+
 
 """
     free_factors!()
