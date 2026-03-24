@@ -161,6 +161,25 @@ If `M` changes during, e.g., an outer optimization loop, the current safe strate
 factorize_shifts_grouped!(owner, K, Mnew, xis)
 ```
 
+### Tuning workers and threads
+
+For a machine with many cores, performance depends on the balance between the number of Julia workers (parallelism over shifts) and the number of OpenMP threads used inside each MUMPS factorization.
+
+A practical rule is to choose the number of workers and OpenMP threads so that
+`n_workers * n_threads` is somewhat below the total number of physical cores, leaving headroom for system processes and runtime overhead.
+
+So, for 16 shifts on a 96-core machine, it is sensible to benchmark configurations such as 16×5, 10×8, or 8×10 (workers × OpenMP threads). Using more workers than shifts is not beneficial.
+
+In general, the number of workers should not exceed the number of shifts, since there is at most one independent factorization per shift. If fewer workers than shifts are used, the shifts are processed in grouped batches: each worker handles its assigned batch sequentially, while batches run concurrently across workers.
+
+A practical rule is to choose the number of workers and OpenMP threads so that
+
+```math
+n_{\mathrm{workers}} \times n_{\mathrm{threads}} \approx n_{\mathrm{cores}}.
+```
+
+Benchmarking a few such combinations is recommended, since the optimal balance depends on the size of the sparse direct factorization and the available memory bandwidth.
+
 ## Testing
 
 From the Julia REPL:
