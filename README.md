@@ -11,10 +11,10 @@
 
 where
 
-- `K` and `M` are sparse matrices,
-- `xis` is a vector of shifts,
+- `K` and `M` are sparse real-valued matrices,
+- `xis` is a vector of (complex) shifts,
 - `B` is a fixed right-hand side, possibly with many columns,
-- `X` is a container of solution blocks, ordered so that `X[i]` corresponds to `xis[i]`
+- `X` is a container of (complex) solution blocks, ordered so that `X[i]` corresponds to `xis[i]`
 
 The package is designed for the case where
 
@@ -99,11 +99,11 @@ owner = Dict(i => ws[mod1(i, length(ws))] for i in eachindex(xis))
 factorize_shifts_grouped!(owner, K, M, xis)
 
 B = rand(ComplexF64, n, 3)
-Xs = solve_block_all_xis(owner, xis, B)
+X = solve_block_all_xis(owner, xis, B)
 
 for i in eachindex(xis)
     A = K - xis[i] * M
-    println("shift $i residual = ", norm(A * Xs[i] - B) / norm(B))
+    println("shift $i residual = ", norm(A * X[i] - B) / norm(B))
 end
 
 free_factors!()
@@ -118,7 +118,15 @@ Each shift index `i` is assigned to a worker through the dictionary
 owner[i] => worker_id
 ```
 
-The factorization for shift `i` is built and stored on that worker. Solves are then grouped by worker so that remote-call overhead is reduced.
+The factorization for shift `i` is built and stored on that worker.
+
+If the number of workers is smaller than the number of shifts, the shifts are still processed in parallel, but in grouped batches. Each worker handles its assigned batch sequentially, while the batches themselves run concurrently across workers. The grouping has to be defined once as follows:
+
+```julia
+ws = workers()
+owner = Dict(i => ws[mod1(i, length(ws))] for i in eachindex(xis))
+```
+
 
 ## Notes on sparsity patterns
 
