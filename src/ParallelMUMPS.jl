@@ -10,8 +10,8 @@ using LinearAlgebra
 
 export init_workers!,
     factorize_shifts_grouped!,
-    solve_block_all_xis, 
-    solve_columns_all_xis,   
+    solve_block_all_xis,
+    solve_columns_all_xis,
     free_factors!,
     finalize_workers!
 
@@ -19,13 +19,50 @@ export init_workers!,
 # Worker-local state and helpers
 # -----------------------------------------------------------------------------
 
-const FACTORS = Dict{Int,Any}()
+mutable struct WorkerState
+    factors_f64::Dict{Int,Mumps{Float64}}
+    factors_c64::Dict{Int,Mumps{ComplexF64}}
+end
 
-"""
-    _init_local_worker!()
+const STATE = WorkerState(
+    Dict{Int,Mumps{Float64}}(),
+    Dict{Int,Mumps{ComplexF64}}(),
+)
 
-Initialize MPI on the current process if needed.
-"""
+factor_dict(::Type{Float64}) = STATE.factors_f64
+factor_dict(::Type{ComplexF64}) = STATE.factors_c64
+factor_dict(::Type{T}) where {T} =
+    throw(ArgumentError("Unsupported MUMPS scalar type: $T"))
+
+function _delete_factor!(i::Integer)
+    ii = Int(i)
+    if haskey(STATE.factors_f64, ii)
+        finalize(STATE.factors_f64[ii])
+        delete!(STATE.factors_f64, ii)
+    end
+    if haskey(STATE.factors_c64, ii)
+        finalize(STATE.factors_c64[ii])
+        delete!(STATE.factors_c64, ii)
+    end
+    return nothing
+end
+
+function _factor_dict_for_idxs(idxs::AbstractVector{<:Integer})
+    isempty(idxs) && throw(ArgumentError("idxs must be non-empty"))
+    i0 = Int(first(idxs))
+    if haskey(STATE.factors_f64, i0)
+        return STATE.factors_f64
+    elseif haskey(STATE.factors_c64, i0)
+        return STATE.factors_c64
+    else
+        throw(KeyError(i0))
+    end
+end
+
+# -----------------------------------------------------------------------------
+# Worker lifecycle
+# -----------------------------------------------------------------------------
+
 function _init_local_worker!()
     if !MPI.Initialized()
         MPI.Init()
@@ -33,24 +70,18 @@ function _init_local_worker!()
     return nothing
 end
 
-"""
-    _free_local_factors!()
-
-Free cached MUMPS factors on the current process only.
-"""
 function _free_local_factors!()
-    for m in values(FACTORS)
+    for m in values(STATE.factors_f64)
         finalize(m)
     end
-    empty!(FACTORS)
+    for m in values(STATE.factors_c64)
+        finalize(m)
+    end
+    empty!(STATE.factors_f64)
+    empty!(STATE.factors_c64)
     return nothing
 end
 
-"""
-    _shutdown_local_worker!()
-
-Free local factors and finalize MPI on the current process.
-"""
 function _shutdown_local_worker!()
     _free_local_factors!()
     if MPI.Initialized() && !MPI.Finalized()
@@ -59,13 +90,10 @@ function _shutdown_local_worker!()
     return nothing
 end
 
-"""
-    _assemble_shift!(A, K, M, ξ)
+# -----------------------------------------------------------------------------
+# Assembly helpers
+# -----------------------------------------------------------------------------
 
-Overwrite the numeric values of `A` with `K - ξ*M` without reallocating the
-CSC structure. This requires `A`, `K`, and `M` to have identical sparsity
-patterns.
-"""
 function _assemble_shift!(A::SparseMatrixCSC, K::SparseMatrixCSC, M::SparseMatrixCSC, ξ)
     (A.colptr == K.colptr == M.colptr && A.rowval == K.rowval == M.rowval) ||
         throw(ArgumentError("K, M, and A must have identical sparsity patterns"))
@@ -79,141 +107,135 @@ function _assemble_shift!(A::SparseMatrixCSC, K::SparseMatrixCSC, M::SparseMatri
     return A
 end
 
+same_pattern(K::SparseMatrixCSC, M::SparseMatrixCSC) =
+    K.colptr == M.colptr && K.rowval == M.rowval
 
+# -----------------------------------------------------------------------------
+# Factorization
+# -----------------------------------------------------------------------------
 
-"""
-    build_factor!(i, A)
-
-Build or rebuild the factorization for shift index `i` on the current process.
-"""
-function build_factor!(i, A)
-    # A = K - ξ * M
-    if haskey(FACTORS, i)
-        finalize(FACTORS[i])
-        delete!(FACTORS, i)
-    end
+function build_factor!(i::Integer, A::SparseMatrixCSC{T,Ti}) where {T<:Union{Float64,ComplexF64},Ti}
+    _delete_factor!(i)
     icntl = get_icntl(verbose=false)
-    m = Mumps{eltype(A)}(mumps_unsymmetric, icntl, default_cntl64)
+    m = Mumps{T}(mumps_unsymmetric, icntl, default_cntl64)
     associate_matrix!(m, A)
     factorize!(m)
-    FACTORS[i] = m
+    factor_dict(T)[Int(i)] = m
     return nothing
 end
 
-"""
-    build_factor!(i, K, M, ξ)
+function build_factor!(i::Integer,
+                       K::SparseMatrixCSC{TK,Ti},
+                       M::SparseMatrixCSC{TM,Ti},
+                       ξ) where {TK<:Union{Float64,ComplexF64},TM<:Union{Float64,ComplexF64},Ti}
 
-Build or rebuild the factorization for shift index `i` on the current process.
-"""
-function build_factor!(i, K, M, ξ)
+    T = promote_type(TK, TM, typeof(ξ))
+    T <: Union{Float64,ComplexF64} ||
+        throw(ArgumentError("Unsupported factor scalar type: $T"))
+
     A = K - ξ * M
-    if haskey(FACTORS, i)
-        finalize(FACTORS[i])
-        delete!(FACTORS, i)
-    end
-    icntl = get_icntl(verbose=false)
-    m = Mumps{eltype(A)}(mumps_unsymmetric, icntl, default_cntl64)
-    associate_matrix!(m, A)
-    factorize!(m)
-    FACTORS[i] = m
-    return nothing
+    build_factor!(i, A)
 end
 
+function build_many_factors!(idxs::AbstractVector{<:Integer},
+                             K::SparseMatrixCSC{TK,Ti},
+                             M::SparseMatrixCSC{TM,Ti},
+                             xis::AbstractVector) where {TK<:Union{Float64,ComplexF64},TM<:Union{Float64,ComplexF64},Ti}
 
-"""
-    build_many_factors!(idxs, K, M, xis)
-
-Build factors for several shift indices on the current process.
-This reuses one sparse workspace matrix to avoid allocating `K - ξ*M`
-for every shift. `K` and `M` must have identical sparsity patterns.
-
-"""
-function build_many_factors!(idxs, K::SparseMatrixCSC, M::SparseMatrixCSC, xis)
     length(idxs) == length(xis) || throw(ArgumentError("idxs and xis must have same length"))
 
-        # K.colptr == M.colptr || throw(ArgumentError("K and M must have identical sparsity patterns"))
-    # K.rowval == M.rowval || throw(ArgumentError("K and M must have identical sparsity patterns"))
+    Twork = promote_type(TK, TM, eltype(xis))
+    Twork <: Union{Float64,ComplexF64} ||
+        throw(ArgumentError("Unsupported factor scalar type: $Twork"))
 
-    do_A = (K.colptr == M.colptr) & (K.rowval == M.rowval) 
-    
-    if do_A
-        # Awork = copy(K)
-        Twork = promote_type(eltype(K), eltype(M), eltype(xis))
+    if same_pattern(K, M)
         Awork = SparseMatrixCSC(
-            size(K, 1),
-            size(K, 2),
+            size(K,1), size(K,2),
             copy(K.colptr),
             copy(K.rowval),
-            Vector{Twork}(undef, nnz(K)),
+            Vector{Twork}(undef, nnz(K))
         )
-    end
 
-    for k in eachindex(idxs)
-        # build_factor!(idxs[k], (K - xis[k] * M) )
-        if do_A 
+        for k in eachindex(idxs)
             _assemble_shift!(Awork, K, M, xis[k])
             build_factor!(idxs[k], Awork)
-        else
+        end
+    else
+        for k in eachindex(idxs)
             build_factor!(idxs[k], K, M, xis[k])
         end
     end
+
     return nothing
 end
 
+# -----------------------------------------------------------------------------
+# Local solves (typed, allocation-aware)
+# -----------------------------------------------------------------------------
 
-"""
-solve_same_rhs_with_factors(idxs, B)
+function _solve_same_rhs_with_factors(idxs, b::AbstractVector, cache)
+    S = eltype(b)
+    Xs = Vector{Vector{S}}(undef, length(idxs))
+    rhs = Vector{S}(undef, length(b))
 
-Solve local systems for several shift indices with the same RHS block `B`.
-    Returns solutions in the same order as `idxs`.
-    """
-function solve_same_rhs_with_factors(idxs, B)
-    Xs = Vector{Any}(undef, length(idxs))
     for k in eachindex(idxs)
-        m = FACTORS[idxs[k]]
-        associate_rhs!(m, B)
+        copyto!(rhs, b)
+        m = cache[Int(idxs[k])]
+        associate_rhs!(m, rhs)
         solve!(m)
-        Xs[k] = get_solution(m)
+        Xs[k] = copy(get_solution(m))
         MUMPS.set_job!(m, 4)
     end
     return Xs
 end
 
-"""
-    solve_matching_columns_with_factors(idxs, B)
+function _solve_same_rhs_with_factors(idxs, B::AbstractMatrix, cache)
+    S = eltype(B)
+    Xs = Vector{Matrix{S}}(undef, length(idxs))
+    rhs = Matrix{S}(undef, size(B))
 
-Solve local systems for several shift indices where the right-hand side for
-shift `idxs[k]` is the corresponding column `B[:, idxs[k]]`.
-
-Returns a vector `xs` in the same order as `idxs`, where each entry is the
-solution vector for the matching shift.
-"""
-function solve_matching_columns_with_factors(idxs, B)
-    size(B, 2) >= maximum(idxs) || throw(ArgumentError("B must have at least one column per shift index"))
-
-    xs = Vector{Any}(undef, length(idxs))
     for k in eachindex(idxs)
-        i = idxs[k]
-        m = FACTORS[i]
-        bi = copy(B[:, i])
-        associate_rhs!(m, bi)
+        copyto!(rhs, B)
+        m = cache[Int(idxs[k])]
+        associate_rhs!(m, rhs)
         solve!(m)
-        xs[k] = copy(get_solution(m))
+        Xs[k] = copy(get_solution(m))
         MUMPS.set_job!(m, 4)
     end
-    return xs
+    return Xs
+end
+
+function solve_same_rhs_with_factors(idxs, B)
+    cache = _factor_dict_for_idxs(idxs)
+    _solve_same_rhs_with_factors(idxs, B, cache)
+end
+
+function _solve_matching_columns_with_factors(idxs, B, cache)
+    S = eltype(B)
+    X = Matrix{S}(undef, size(B,1), length(idxs))
+    bi = Vector{S}(undef, size(B,1))
+
+    for k in eachindex(idxs)
+        i = Int(idxs[k])
+        m = cache[i]
+        copyto!(bi, view(B,:,i))
+        associate_rhs!(m, bi)
+        solve!(m)
+        X[:,k] = get_solution(m)
+        MUMPS.set_job!(m, 4)
+    end
+    return X
+end
+
+function solve_matching_columns_with_factors(idxs, B)
+    cache = _factor_dict_for_idxs(idxs)
+    _solve_matching_columns_with_factors(idxs, B, cache)
 end
 
 # -----------------------------------------------------------------------------
 # Distributed API
 # -----------------------------------------------------------------------------
 
-"""
-    init_workers!()
-
-Load required packages on all current workers and initialize MPI there.
-Call `addprocs(...)` first.
-"""
 function init_workers!()
     ws = workers()
     isempty(ws) && error("No workers. Call addprocs(...) first.")
@@ -225,18 +247,11 @@ function init_workers!()
     return nothing
 end
 
-"""
-    factorize_shifts_grouped!(owner, K, M, xis)
-
-Factorize all shifted systems `K - ξ_i M` in parallel, grouped by owning worker.
-
-`owner[i]` must be the worker id responsible for shift `i`.
-"""
 function factorize_shifts_grouped!(owner::Dict{Int,Int}, K, M, xis)
     ws = unique(values(owner))
 
     grouped_idxs = Dict(w => Int[] for w in ws)
-    grouped_xis = Dict(w => eltype(xis)[] for w in ws)
+    grouped_xis = Dict(w => Vector{eltype(xis)}() for w in ws)
 
     for i in eachindex(xis)
         w = owner[i]
@@ -252,22 +267,6 @@ function factorize_shifts_grouped!(owner::Dict{Int,Int}, K, M, xis)
     return nothing
 end
 
-"""
-    solve_block_all_xis(owner, xis, B)
-
-Solve `(K - ξ_i M) X_i = B` for all `ξ_i` using already cached factors.
-
-Arguments
----------
-- `owner[i]`: worker that owns the factorization for shift `i`
-- `xis`: shift vector, only used for ordering/length
-- `B`: fixed RHS block, vector or dense matrix
-
-Returns
--------
-A vector `Xs` such that `Xs[i]` is the solution block corresponding to `ξ_i`.
-So the ordering of `Xs` matches the ordering of `xis`.
-"""
 function solve_block_all_xis(owner::Dict{Int,Int}, xis, B)
     ws = unique(values(owner))
 
@@ -284,7 +283,7 @@ function solve_block_all_xis(owner::Dict{Int,Int}, xis, B)
 
         @async begin
             Xs_w = remotecall_fetch(solve_same_rhs_with_factors, w, idxs_w, B)
-            for (j, i) in enumerate(idxs_w)
+            for (j,i) in enumerate(idxs_w)
                 Xs[i] = Xs_w[j]
             end
         end
@@ -293,45 +292,27 @@ function solve_block_all_xis(owner::Dict{Int,Int}, xis, B)
     return Xs
 end
 
-"""
-    solve_columns_all_xis(owner, xis, B)
-    Solve
-        (K - ξ_i M) x_i = b_i
-
-for all shifts `ξ_i`, where `b_i` is column `i` of the block `B`.
-
-Arguments
----------
-- `owner[i]`: worker that owns the factorization for shift `i`
-- `xis`: shift vector, only used for ordering/length
-- `B`: block whose i-th column is the right-hand side for shift `i`
-
-Returns
--------
-A matrix `X` whose i-th column is the solution vector corresponding to `ξ_i`.
-The column ordering of `X` matches the ordering of `xis`.
-"""
 function solve_columns_all_xis(owner::Dict{Int,Int}, xis, B)
-    length(xis) == size(B, 2) || throw(ArgumentError("B must have as many columns as xis"))
+    length(xis) == size(B,2) || throw(ArgumentError("B mismatch"))
 
     ws = unique(values(owner))
-
     grouped_idxs = Dict(w => Int[] for w in ws)
+
     for i in eachindex(xis)
         push!(grouped_idxs[owner[i]], i)
     end
 
     T = promote_type(eltype(B), eltype(xis))
-    X = Matrix{T}(undef, size(B, 1), length(xis))
+    X = Matrix{T}(undef, size(B,1), length(xis))
 
     @sync for w in ws
         idxs_w = grouped_idxs[w]
         isempty(idxs_w) && continue
 
         @async begin
-            xs_w = remotecall_fetch(solve_matching_columns_with_factors, w, idxs_w, B)
-            for (j, i) in enumerate(idxs_w)
-                X[:, i] = xs_w[j]
+            X_w = remotecall_fetch(solve_matching_columns_with_factors, w, idxs_w, B)
+            for (j,i) in enumerate(idxs_w)
+                X[:,i] = view(X_w,:,j)
             end
         end
     end
@@ -339,31 +320,21 @@ function solve_columns_all_xis(owner::Dict{Int,Int}, xis, B)
     return X
 end
 
+# -----------------------------------------------------------------------------
+# Cleanup
+# -----------------------------------------------------------------------------
 
-
-"""
-    free_factors!()
-
-Free cached MUMPS factors on all workers, but keep MPI alive.
-"""
 function free_factors!()
     for w in workers()
         remotecall_wait(_free_local_factors!, w)
     end
-    return nothing
 end
 
-"""
-    finalize_workers!()
-
-Free factors, finalize MPI on workers, then remove workers.
-"""
 function finalize_workers!()
     for w in workers()
         remotecall_wait(_shutdown_local_worker!, w)
     end
     rmprocs(workers())
-    return nothing
 end
 
 end
