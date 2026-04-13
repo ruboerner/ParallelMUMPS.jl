@@ -173,8 +173,9 @@ end
 # Local solves (typed, allocation-aware)
 # -----------------------------------------------------------------------------
 
-function _solve_same_rhs_with_factors(idxs, b::AbstractVector, cache)
-    S = eltype(b)
+function _solve_same_rhs_with_factors(idxs::AbstractVector{<:Integer},
+                                      b::AbstractVector,
+                                      cache::Dict{Int,Mumps{S}}) where {S}
     Xs = Vector{Vector{S}}(undef, length(idxs))
     rhs = Vector{S}(undef, length(b))
 
@@ -183,16 +184,17 @@ function _solve_same_rhs_with_factors(idxs, b::AbstractVector, cache)
         m = cache[Int(idxs[k])]
         associate_rhs!(m, rhs)
         solve!(m)
-        Xs[k] = copy(get_solution(m))
+        Xs[k] = vec(copy(get_solution(m)))
         MUMPS.set_job!(m, 4)
     end
     return Xs
 end
 
-function _solve_same_rhs_with_factors(idxs, B::AbstractMatrix, cache)
-    S = eltype(B)
+function _solve_same_rhs_with_factors(idxs::AbstractVector{<:Integer},
+                                      b::AbstractMatrix,
+                                      cache::Dict{Int,Mumps{S}}) where {S}
     Xs = Vector{Matrix{S}}(undef, length(idxs))
-    rhs = Matrix{S}(undef, size(B))
+    rhs = Matrix{S}(undef, size(B, 1), size(B, 2))
 
     for k in eachindex(idxs)
         copyto!(rhs, B)
@@ -205,31 +207,34 @@ function _solve_same_rhs_with_factors(idxs, B::AbstractMatrix, cache)
     return Xs
 end
 
-function solve_same_rhs_with_factors(idxs, B)
+function solve_same_rhs_with_factors(idxs::AbstractVector{<:Integer}, B::AbstractVecOrMat)
     cache = _factor_dict_for_idxs(idxs)
-    _solve_same_rhs_with_factors(idxs, B, cache)
+    return _solve_same_rhs_with_factors(idxs, B, cache)
 end
 
-function _solve_matching_columns_with_factors(idxs, B, cache)
-    S = eltype(B)
-    X = Matrix{S}(undef, size(B,1), length(idxs))
-    bi = Vector{S}(undef, size(B,1))
+function _solve_matching_columns_with_factors(idxs::AbstractVector{<:Integer},
+                                              B::AbstractMatrix,
+                                              cache::Dict{Int,Mumps{S}}) where {S}
+    size(B, 2) >= maximum(idxs) || throw(ArgumentError("B must have at least one column per shift index"))
+
+    X = Matrix{S}(undef, size(B, 1), length(idxs))
+    bi = Vector{S}(undef, size(B, 1))
 
     for k in eachindex(idxs)
         i = Int(idxs[k])
         m = cache[i]
-        copyto!(bi, view(B,:,i))
+        copyto!(bi, view(B, :, i))
         associate_rhs!(m, bi)
         solve!(m)
-        X[:,k] = get_solution(m)
+        X[:, k] = get_solution(m)
         MUMPS.set_job!(m, 4)
     end
     return X
 end
 
-function solve_matching_columns_with_factors(idxs, B)
+function solve_matching_columns_with_factors(idxs::AbstractVector{<:Integer}, B::AbstractMatrix)
     cache = _factor_dict_for_idxs(idxs)
-    _solve_matching_columns_with_factors(idxs, B, cache)
+    return _solve_matching_columns_with_factors(idxs, B, cache)
 end
 
 # -----------------------------------------------------------------------------
