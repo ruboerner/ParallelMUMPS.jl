@@ -191,7 +191,7 @@ function _solve_same_rhs_with_factors(idxs::AbstractVector{<:Integer},
 end
 
 function _solve_same_rhs_with_factors(idxs::AbstractVector{<:Integer},
-                                      b::AbstractMatrix,
+                                      B::AbstractMatrix,
                                       cache::Dict{Int,Mumps{S}}) where {S}
     Xs = Vector{Matrix{S}}(undef, length(idxs))
     rhs = Matrix{S}(undef, size(B, 1), size(B, 2))
@@ -226,7 +226,7 @@ function _solve_matching_columns_with_factors(idxs::AbstractVector{<:Integer},
         copyto!(bi, view(B, :, i))
         associate_rhs!(m, bi)
         solve!(m)
-        X[:, k] = get_solution(m)
+        X[:, k] = vec(copy(get_solution(m)))
         MUMPS.set_job!(m, 4)
     end
     return X
